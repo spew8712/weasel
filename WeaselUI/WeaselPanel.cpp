@@ -69,6 +69,7 @@ WeaselPanel::~WeaselPanel()
 	Gdiplus::GdiplusShutdown(_m_gdiplusToken);
 	delete m_layout;
 	m_layout = NULL;
+	//pDWR.reset();
 }
 
 void WeaselPanel::_ResizeWindow()
@@ -148,19 +149,12 @@ void WeaselPanel::_InitFontRes(void)
 	if (hMonitor)
 		GetDpiForMonitor(hMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
 	// prepare d2d1 resources
-	if (pDWR == NULL)
-		pDWR.reset(new DirectWriteResources(m_style, dpiX));
-		//pDWR = std::make_shared<DirectWriteResources>(m_style, dpiX);
-	// if style changed, re-initialize font resources
-	else if (m_ostyle != m_style)
+	// if style changed, or dpi changed, or pDWR NULL, re-initialize directwrite resources
+	if ((pDWR == NULL) || (m_ostyle != m_style) || (dpiX != dpi))
 	{
-		pDWR->InitResources(m_style, dpiX);
+		pDWR.reset();
+		pDWR = std::make_shared< DirectWriteResources>(m_style, dpiX);
 		pDWR->pRenderTarget->SetTextAntialiasMode((D2D1_TEXT_ANTIALIAS_MODE)m_style.antialias_mode);
-
-	}
-	else if( dpiX != dpi)
-	{
-		pDWR->InitResources(m_style, dpiX);
 	}
 	m_ostyle = m_style;
 	dpi = dpiX;
@@ -432,7 +426,7 @@ bool WeaselPanel::_DrawPreedit(Text const& text, CDCHandle dc, CRect const& rc)
 {
 	bool drawn = false;
 	std::wstring const& t = text.str;
-	IDWriteTextFormat1* txtFormat = pDWR->pPreeditTextFormat;
+	IDWriteTextFormat1* txtFormat = pDWR->pPreeditTextFormat.Get();
 
 	if (!t.empty()) {
 		weasel::TextRange range;
@@ -524,7 +518,7 @@ bool WeaselPanel::_DrawPreeditBack(Text const& text, CDCHandle dc, CRect const& 
 {
 	bool drawn = false;
 	std::wstring const& t = text.str;
-	IDWriteTextFormat1* txtFormat = pDWR->pPreeditTextFormat;
+	IDWriteTextFormat1* txtFormat = pDWR->pPreeditTextFormat.Get();
 
 	if (!t.empty()) {
 		weasel::TextRange range;
@@ -585,9 +579,9 @@ bool WeaselPanel::_DrawCandidates(CDCHandle &dc, bool back)
 	const std::vector<Text> &comments(m_ctx.cinfo.comments);
 	const std::vector<Text> &labels(m_ctx.cinfo.labels);
 
-	IDWriteTextFormat1* txtFormat = pDWR->pTextFormat;
-	IDWriteTextFormat1* labeltxtFormat = pDWR->pLabelTextFormat;
-	IDWriteTextFormat1* commenttxtFormat = pDWR->pCommentTextFormat;
+	ComPtr<IDWriteTextFormat1> txtFormat = pDWR->pTextFormat;
+	ComPtr<IDWriteTextFormat1> labeltxtFormat = pDWR->pLabelTextFormat;
+	ComPtr<IDWriteTextFormat1> commenttxtFormat = pDWR->pCommentTextFormat;
 	BackType bkType = BackType::CAND;
 
 
@@ -672,28 +666,28 @@ bool WeaselPanel::_DrawCandidates(CDCHandle &dc, bool back)
 				else
 					hlRc = CRect(rc.left + m_style.hilite_padding + (m_layout->MARK_GAP - m_layout->MARK_WIDTH) / 2 + 1, rc.top + vgap,
 					rc.left + m_style.hilite_padding + (m_layout->MARK_GAP - m_layout->MARK_WIDTH) / 2 + 1 + m_layout->MARK_WIDTH, rc.bottom - vgap);
-				_TextOut(hlRc, m_style.mark_text.c_str(), m_style.mark_text.length(), m_style.hilited_mark_color, pDWR->pTextFormat);
+				_TextOut(hlRc, m_style.mark_text.c_str(), m_style.mark_text.length(), m_style.hilited_mark_color, pDWR->pTextFormat.Get());
 			}
 			// Draw label
 			std::wstring label = m_layout->GetLabelText(labels, (int)i, m_style.label_text_format.c_str());
 			if (!label.empty()) {
 				rect = m_layout->GetCandidateLabelRect((int)i);
 				if(m_istorepos) rect.OffsetRect(0, m_offsetys[i]);
-				_TextOut(rect, label.c_str(), label.length(), label_text_color, labeltxtFormat);
+				_TextOut(rect, label.c_str(), label.length(), label_text_color, labeltxtFormat.Get());
 			}
 			// Draw text
 			std::wstring text = candidates.at(i).str;
 			if (!text.empty()) {
 				rect = m_layout->GetCandidateTextRect((int)i);
 				if(m_istorepos) rect.OffsetRect(0, m_offsetys[i]);
-				_TextOut(rect, text.c_str(), text.length(), candidate_text_color, txtFormat);
+				_TextOut(rect, text.c_str(), text.length(), candidate_text_color, txtFormat.Get());
 			}
 			// Draw comment
 			std::wstring comment = comments.at(i).str;
 			if (!comment.empty()) {
 				rect = m_layout->GetCandidateCommentRect((int)i);
 				if(m_istorepos) rect.OffsetRect(0, m_offsetys[i]);
-				_TextOut(rect, comment.c_str(), comment.length(), comment_text_color, commenttxtFormat);
+				_TextOut(rect, comment.c_str(), comment.length(), comment_text_color, commenttxtFormat.Get());
 			}
 			drawn = true;
 		}
@@ -930,42 +924,49 @@ void WeaselPanel::_RepositionWindow(bool adj)
 	SetWindowPos(HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
 }
 
-void WeaselPanel::_TextOut(CRect const& rc, std::wstring psz, size_t cch, int inColor, IDWriteTextFormat* pTextFormat)
+void WeaselPanel::_TextOut(CRect const& rc, std::wstring psz, size_t cch, int inColor, IDWriteTextFormat1* pTextFormat)
 {
 	if (pTextFormat == NULL) return;
 	float r = (float)(GetRValue(inColor))/255.0f;
 	float g = (float)(GetGValue(inColor))/255.0f;
 	float b = (float)(GetBValue(inColor))/255.0f;
 	float alpha = (float)((inColor >> 24) & 255) / 255.0f;
-	pDWR->pBrush->SetColor(D2D1::ColorF(r, g, b, alpha));
+	HRESULT hr = S_OK;
+	if (pDWR->pBrush == NULL)
+	{
+		hr = pDWR->CreateBrush(D2D1::ColorF(r, g, b, alpha));
+		if (FAILED(hr))	MessageBox(L"Failed CreateBrush", L"Info");
+	}
+	else
+		pDWR->SetBrushColor(D2D1::ColorF(r, g, b, alpha));
 
 	if (NULL != pDWR->pBrush && NULL != pTextFormat) {
-		pDWR->pDWFactory->CreateTextLayout( psz.c_str(), (UINT32)psz.size(), pTextFormat, (float)rc.Width(), (float)rc.Height(), reinterpret_cast<IDWriteTextLayout**>(&pDWR->pTextLayout));
+		pDWR->CreateTextLayout( psz.c_str(), (UINT32)psz.size(), pTextFormat, (float)rc.Width(), (float)rc.Height());
 		if (m_style.layout_type == UIStyle::LAYOUT_VERTICAL_TEXT) {
 			DWRITE_FLOW_DIRECTION flow = m_style.vertical_text_left_to_right ? DWRITE_FLOW_DIRECTION_LEFT_TO_RIGHT : DWRITE_FLOW_DIRECTION_RIGHT_TO_LEFT;
-			pDWR->pTextLayout->SetReadingDirection(DWRITE_READING_DIRECTION_TOP_TO_BOTTOM);
-			pDWR->pTextLayout->SetFlowDirection(flow);
+			pDWR->SetLayoutReadingDirection(DWRITE_READING_DIRECTION_TOP_TO_BOTTOM);
+			pDWR->SetLayoutFlowDirection(flow);
 		}
 
 		// offsetx for font glyph over left
-		float offsetx = rc.left;
-		float offsety = rc.top;
+		float offsetx = (float)rc.left;
+		float offsety = (float)rc.top;
 		// prepare for space when first character overhanged
 		DWRITE_OVERHANG_METRICS omt;
-		pDWR->pTextLayout->GetOverhangMetrics(&omt);
+		pDWR->GetLayoutOverhangMetrics(&omt);
 		if (m_style.layout_type != UIStyle::LAYOUT_VERTICAL_TEXT && omt.left > 0)
 			offsetx += omt.left;
 		if (m_style.layout_type == UIStyle::LAYOUT_VERTICAL_TEXT && omt.top > 0)
 			offsety += omt.top;
 
 		if (pDWR->pTextLayout != NULL) {
-			pDWR->pRenderTarget->DrawTextLayout({ offsetx, offsety }, pDWR->pTextLayout, pDWR->pBrush, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+			pDWR->DrawTextLayoutAt({ offsetx, offsety });
 #if 0
 			D2D1_RECT_F rectf =  D2D1::RectF(offsetx, offsety, offsetx + rc.Width(), offsety + rc.Height());
-			pDWR->pRenderTarget->DrawRectangle(&rectf, pDWR->pBrush);
+			pDWR->DrawRect(&rectf);
 #endif
 		}
-		SafeRelease(&pDWR->pTextLayout);
+		pDWR->ResetLayout();
 	}
 }
 
