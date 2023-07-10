@@ -55,7 +55,7 @@ void _RefreshTrayIcon(const UINT session_id, const std::function<void()> _Update
 	// Dangerous, don't touch
 	static char app_name[50];
 	RimeGetProperty(session_id, "client_app", app_name, sizeof(app_name) - 1);
-	if (utf8towcs(app_name) == std::wstring(L"explorer.exe")) 
+	if (string_to_wstring(app_name, CP_UTF8) == std::wstring(L"explorer.exe")) 
 		boost::thread th([=]() { ::Sleep(100); if (_UpdateUICallback) _UpdateUICallback(); });
 	else 
 		if (_UpdateUICallback) _UpdateUICallback();
@@ -67,11 +67,8 @@ void RimeWithWeaselHandler::_Setup()
 	weasel_traits.shared_data_dir = weasel_shared_data_dir();
 	weasel_traits.user_data_dir = weasel_user_data_dir();
 	weasel_traits.prebuilt_data_dir = weasel_traits.shared_data_dir;
-	const int len = 20;
-	char utf8_str[len];
-	memset(utf8_str, 0, sizeof(utf8_str));
-	WideCharToMultiByte(CP_UTF8, 0, WEASEL_IME_NAME, -1, utf8_str, len - 1, NULL, NULL);
-	weasel_traits.distribution_name = utf8_str;
+	std::string distribution_name(wstring_to_string(WEASEL_IME_NAME, CP_UTF8));
+	weasel_traits.distribution_name = distribution_name.c_str();
 	weasel_traits.distribution_code_name = WEASEL_CODE_NAME;
 	weasel_traits.distribution_version = WEASEL_VERSION;
 	weasel_traits.app_name = "rime.weasel";
@@ -266,12 +263,12 @@ void RimeWithWeaselHandler::_ReadClientInfo(UINT session_id, LPWSTR buffer)
 		{
 			std::wstring lwr = line;
 			to_lower(lwr);
-			app_name = wcstoutf8(lwr.substr(kClientAppKey.length()).c_str());
+			app_name = wstring_to_string(lwr.substr(kClientAppKey.length()).c_str(), CP_UTF8);
 		}
 		const std::wstring kClientTypeKey = L"session.client_type=";
 		if (starts_with(line, kClientTypeKey))
 		{
-			client_type = wcstoutf8(line.substr(kClientTypeKey.length()).c_str());
+			client_type = wstring_to_string(line.substr(kClientTypeKey.length()).c_str(), CP_UTF8);
 		}
 	}
     // set app specific options
@@ -305,14 +302,14 @@ void RimeWithWeaselHandler::_GetCandidateInfo(weasel::CandidateInfo & cinfo, Rim
 	cinfo.labels.resize(ctx.menu.num_candidates);
 	for (int i = 0; i < ctx.menu.num_candidates; ++i)
 	{
-		cinfo.candies[i].str = std::regex_replace(utf8towcs(ctx.menu.candidates[i].text),  std::wregex(L"\\r\\n|\\n|\\r"), L"\r");
+		cinfo.candies[i].str = std::regex_replace(string_to_wstring(ctx.menu.candidates[i].text, CP_UTF8),  std::wregex(L"\\r\\n|\\n|\\r"), L"\r");
 		if (ctx.menu.candidates[i].comment)
 		{
-			cinfo.comments[i].str = std::regex_replace(utf8towcs(ctx.menu.candidates[i].comment),  std::wregex(L"\\r\\n|\\n|\\r"), L"\r");
+			cinfo.comments[i].str = std::regex_replace(string_to_wstring(ctx.menu.candidates[i].comment, CP_UTF8),  std::wregex(L"\\r\\n|\\n|\\r"), L"\r");
 		}
 		if (RIME_STRUCT_HAS_MEMBER(ctx, ctx.select_labels) && ctx.select_labels)
 		{
-			cinfo.labels[i].str = std::regex_replace(utf8towcs(ctx.select_labels[i]),  std::wregex(L"\\r\\n|\\n|\\r"), L"\r");
+			cinfo.labels[i].str = std::regex_replace(string_to_wstring(ctx.select_labels[i], CP_UTF8),  std::wregex(L"\\r\\n|\\n|\\r"), L"\r");
 		}
 		else if (ctx.menu.select_keys)
 		{
@@ -416,17 +413,36 @@ void RimeWithWeaselHandler::_UpdateUI(UINT session_id)
 	m_message_value.clear();
 }
 
+void _LoadIconSettingFromSchema(RimeConfig& config, char *buffer, const int& BUF_SIZE, 
+		const char* key1, const char* key2, const std::wstring& user_dir, const std::wstring& shared_dir, std::wstring& value)
+{
+	memset(buffer, '\0', (BUF_SIZE+1));
+	if (RimeConfigGetString(&config, key1, buffer, BUF_SIZE) || (key2 != NULL && RimeConfigGetString(&config, key2, buffer, BUF_SIZE))) {
+		std::wstring tmp = string_to_wstring(buffer, CP_UTF8);
+		DWORD dwAttrib = GetFileAttributes((user_dir + L"\\" + tmp).c_str());
+		if (!(INVALID_FILE_ATTRIBUTES != dwAttrib && 0 == (dwAttrib & FILE_ATTRIBUTE_DIRECTORY))) {
+			dwAttrib = GetFileAttributes((shared_dir + L"\\" + tmp).c_str());
+			if (!(INVALID_FILE_ATTRIBUTES != dwAttrib && 0 == (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)))
+				value = L"";
+			else
+				value = (shared_dir + L"\\" + tmp);
+		}
+		else value = user_dir + L"\\" + tmp;
+	}
+	else value = L"";
+}
+
 void RimeWithWeaselHandler::_LoadSchemaSpecificSettings(const std::string& schema_id)
 {
 	if (!m_ui) return;
 	const int BUF_SIZE = 255;
 	char buffer[BUF_SIZE + 1];
 	RimeConfig config;
-	if (!RimeSchemaOpen(schema_id.c_str(), &config))
-		return;
+	if (!RimeSchemaOpen(schema_id.c_str(), &config)) return;
 	m_ui->style() = m_base_style;
 	_UpdateUIStyle(&config, m_ui, false);
 
+	// load schema color style config
 	memset(buffer, '\0', sizeof(buffer));
 	if (RimeConfigGetString(&config, "style/color_scheme", buffer, BUF_SIZE))
 	{
@@ -439,48 +455,12 @@ void RimeWithWeaselHandler::_LoadSchemaSpecificSettings(const std::string& schem
 	}
 	// load schema icon start
 	{
-		memset(buffer, '\0', sizeof(buffer));
-		if (RimeConfigGetString(&config, "schema/icon", buffer, BUF_SIZE)
-				|| RimeConfigGetString(&config, "schema/zhung_icon", buffer, BUF_SIZE))
-		{
-			std::wstring tmp = utf8towcs(buffer);
-			std::wstring user_dir = string_to_wstring(weasel_user_data_dir());
-			DWORD dwAttrib = GetFileAttributes((user_dir + L"\\" + tmp).c_str());
-			if (!(INVALID_FILE_ATTRIBUTES != dwAttrib && 0 == (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)))
-			{
-				std::wstring share_dir = string_to_wstring(weasel_shared_data_dir());
-				dwAttrib = GetFileAttributes((share_dir + L"\\" + tmp).c_str());
-				if (!(INVALID_FILE_ATTRIBUTES != dwAttrib && 0 == (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)))
-					m_ui->style().current_zhung_icon = L"";
-				else
-					m_ui->style().current_zhung_icon = (share_dir + L"\\" + tmp);
-			}
-			else
-				m_ui->style().current_zhung_icon = user_dir + L"\\" + tmp;
-		}
-		else
-			m_ui->style().current_zhung_icon = L"";
-
-		memset(buffer, '\0', sizeof(buffer));
-		if (RimeConfigGetString(&config, "schema/ascii_icon", buffer, BUF_SIZE))
-		{
-			std::wstring tmp = utf8towcs(buffer);
-			std::wstring user_dir = string_to_wstring(weasel_user_data_dir());
-			DWORD dwAttrib = GetFileAttributes((user_dir + L"\\" + tmp).c_str());
-			if (!(INVALID_FILE_ATTRIBUTES != dwAttrib && 0 == (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)))
-			{
-				std::wstring share_dir = string_to_wstring(weasel_shared_data_dir());
-				dwAttrib = GetFileAttributes((share_dir + L"\\" + tmp).c_str());
-				if (!(INVALID_FILE_ATTRIBUTES != dwAttrib && 0 == (dwAttrib & FILE_ATTRIBUTE_DIRECTORY)))
-					m_ui->style().current_ascii_icon = L"";
-				else
-					m_ui->style().current_ascii_icon = (share_dir + L"\\" + tmp);
-			}
-			else
-				m_ui->style().current_ascii_icon = user_dir + L"\\" + tmp;
-		}
-		else
-			m_ui->style().current_ascii_icon = L"";
+		std::wstring user_dir = string_to_wstring(weasel_user_data_dir());
+		std::wstring shared_dir = string_to_wstring(weasel_shared_data_dir());
+		_LoadIconSettingFromSchema(config, buffer, BUF_SIZE, "schema/icon", "schema/zhung_icon", user_dir, shared_dir, m_ui->style().current_zhung_icon);
+		_LoadIconSettingFromSchema(config, buffer, BUF_SIZE, "schema/ascii_icon", NULL, user_dir, shared_dir, m_ui->style().current_ascii_icon);
+		_LoadIconSettingFromSchema(config, buffer, BUF_SIZE, "schema/full_icon", NULL, user_dir, shared_dir, m_ui->style().current_full_icon);
+		_LoadIconSettingFromSchema(config, buffer, BUF_SIZE, "schema/half_icon", NULL, user_dir, shared_dir, m_ui->style().current_half_icon);
 	}
 	// load schema icon end
 	RimeConfigClose(&config);
@@ -629,7 +609,7 @@ bool RimeWithWeaselHandler::_Respond(UINT session_id, EatLine eat)
 
 			oa << cinfo;
 
-			messages.push_back(std::string("ctx.cand=") + wcstoutf8(ss.str().c_str()) + '\n');
+			messages.push_back(std::string("ctx.cand=") + wstring_to_string(ss.str().c_str(), CP_UTF8) + '\n');
 		}
 		RimeFreeContext(&ctx);
 	}
@@ -646,7 +626,7 @@ bool RimeWithWeaselHandler::_Respond(UINT session_id, EatLine eat)
 		oa << m_ui->style();
 
 		actions.insert("style");
-		messages.push_back(std::string("style=") + wcstoutf8(ss.str().c_str()) + '\n');
+		messages.push_back(std::string("style=") + wstring_to_string(ss.str().c_str(), CP_UTF8) + '\n');
 		RimeSetOption(session_id, "__synced", true);
 	}
 
@@ -666,7 +646,7 @@ bool RimeWithWeaselHandler::_Respond(UINT session_id, EatLine eat)
 
 	return std::all_of(messages.begin(), messages.end(), [&eat](std::string &msg)
 	{
-		return eat(std::wstring(utf8towcs(msg.c_str())));
+		return eat(std::wstring(string_to_wstring(msg.c_str(), CP_UTF8)));
 	});
 }
 
@@ -775,7 +755,7 @@ static void _UpdateUIStyle(RimeConfig* config, weasel::UI* ui, bool initialize)
 	memset(buffer, '\0', sizeof(buffer));
 	if (RimeConfigGetString(config, "style/font_face", buffer, BUF_SIZE))
 	{
-		std::wstring tmp = utf8towcs(buffer);
+		std::wstring tmp = string_to_wstring(buffer, CP_UTF8);
 		// remove spaces around seperators  : , 
 		_RemoveSpaceAroundSep(tmp);
 		style.font_face = tmp;
@@ -783,7 +763,7 @@ static void _UpdateUIStyle(RimeConfig* config, weasel::UI* ui, bool initialize)
 	memset(buffer, '\0', sizeof(buffer));
 	if (RimeConfigGetString(config, "style/label_font_face", buffer, BUF_SIZE))
 	{
-		std::wstring tmp = utf8towcs(buffer);
+		std::wstring tmp = string_to_wstring(buffer, CP_UTF8);
 		// remove spaces around seperators  : , 
 		_RemoveSpaceAroundSep(tmp);
 		style.label_font_face = tmp;
@@ -791,7 +771,7 @@ static void _UpdateUIStyle(RimeConfig* config, weasel::UI* ui, bool initialize)
 	memset(buffer, '\0', sizeof(buffer));
 	if (RimeConfigGetString(config, "style/comment_font_face", buffer, BUF_SIZE))
 	{
-		std::wstring tmp = utf8towcs(buffer);
+		std::wstring tmp = string_to_wstring(buffer, CP_UTF8);
 		// remove spaces around seperators  : , 
 		_RemoveSpaceAroundSep(tmp);
 		style.comment_font_face = tmp;
@@ -898,12 +878,12 @@ static void _UpdateUIStyle(RimeConfig* config, weasel::UI* ui, bool initialize)
 	char label_text_format[128] = { 0 };
 	if (RimeConfigGetString(config, "style/label_format", label_text_format, sizeof(label_text_format) - 1))
 	{
-		style.label_text_format = utf8towcs(label_text_format);
+		style.label_text_format = string_to_wstring(label_text_format, CP_UTF8);
 	}
 	char mark_text[128] = { 0 };
 	if (RimeConfigGetString(config, "style/mark_text", mark_text, sizeof(mark_text) - 1))
 	{
-		style.mark_text = utf8towcs(mark_text);
+		style.mark_text = string_to_wstring(mark_text, CP_UTF8);
 	}
 
 	RimeConfigGetInt(config, "style/layout/min_width", &style.min_width);
@@ -1155,7 +1135,7 @@ void RimeWithWeaselHandler::_GetStatus(weasel::Status & stat, UINT session_id)
 				_RefreshTrayIcon(session_id, _UpdateUICallback);	// refresh icon after schema changed
 			}
 		}
-		stat.schema_name = utf8towcs(status.schema_name);
+		stat.schema_name = string_to_wstring(status.schema_name, CP_UTF8);
 		stat.ascii_mode = !!status.is_ascii_mode;
 		stat.composing = !!status.is_composing;
 		stat.disabled = !!status.is_disabled;
@@ -1172,7 +1152,7 @@ void RimeWithWeaselHandler::_GetContext(weasel::Context & weasel_context, UINT s
 	{
 		if (ctx.composition.length > 0)
 		{
-			weasel_context.preedit.str = utf8towcs(ctx.composition.preedit);
+			weasel_context.preedit.str = string_to_wstring(ctx.composition.preedit, CP_UTF8);
 			if (ctx.composition.sel_start < ctx.composition.sel_end)
 			{
 				weasel::TextAttribute attr;
@@ -1208,4 +1188,3 @@ void RimeWithWeaselHandler::_UpdateInlinePreeditStatus(UINT session_id)
 	// show soft cursor on weasel panel but not inline
 	RimeSetOption(session_id, "soft_cursor", Bool(!inline_preedit));
 }
-
