@@ -344,8 +344,8 @@ void WeaselPanel::_HighlightText(CDCHandle &dc, CRect rc, COLORREF color, COLORR
 	g_back.SetSmoothingMode(Gdiplus::SmoothingMode::SmoothingModeHighQuality);
 
 	// blur buffer
-	int blurMarginX = m_layout->offsetX * 3;
-	int blurMarginY = m_layout->offsetY * 3;
+	int blurMarginX = m_layout->offsetX;
+	int blurMarginY = m_layout->offsetY;
 
 	GraphicsRoundRectPath* hiliteBackPath;
 	if (rd.Hemispherical && type!= BackType::BACKGROUND && NOT_FULLSCREENLAYOUT(m_style)) 
@@ -861,6 +861,7 @@ void WeaselPanel::MoveTo(RECT const& rc)
 		RedrawWindow();
 	} else 
 	if((rc.left != m_oinputPos.left && rc.bottom != m_oinputPos.bottom)		// pos changed
+		|| rc.left != m_oinputPos.left
 		|| m_size != m_osize
 		|| m_octx != m_ctx
 		|| (m_ctx.preedit.str.empty() && (CRect(rc) == m_oinputPos))		// first click old pos
@@ -900,7 +901,7 @@ void WeaselPanel::_RepositionWindow(bool adj)
 	int x = m_inputPos.left;
 	int y = m_inputPos.bottom;
 	x -= (m_style.shadow_offset_x >= 0 || COLORTRANSPARENT(m_style.shadow_color)) ? m_layout->offsetX : (m_layout->offsetX / 2);
-	if(adj) y -= (m_style.shadow_offset_y >= 0 || COLORTRANSPARENT(m_style.shadow_color)) ? m_layout->offsetY : (m_layout->offsetY / 2);
+	if(adj) y -= (m_style.shadow_offset_y > 0 || COLORTRANSPARENT(m_style.shadow_color)) ? m_layout->offsetY : (m_layout->offsetY / 2);
 	// for vertical text layout, flow right to left, make window left side
 	if(m_style.layout_type == UIStyle::LAYOUT_VERTICAL_TEXT && !m_style.vertical_text_left_to_right)
 	{
